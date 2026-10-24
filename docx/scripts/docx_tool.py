@@ -44,7 +44,13 @@ NOT_SEARCHED = ["footnotes", "endnotes", "comments", "field codes"]
 LEGACY_MSG = "Legacy .doc is not supported. Save the file as .docx and try again."
 PASSWORD_MSG = "This Word file is password-protected. The skill does not open protected files."
 MACRO_MSG = "Macro-enabled .docm files are not supported. Save as .docx (macros are dropped)."
-UNSUPPORTED_MSG = "Formatting or paragraph-mark tracked changes cannot be resolved by this skill."
+UNSUPPORTED_MSG = "Formatting tracked changes cannot be resolved by this skill."
+MARK_SECTION_MSG = "A paragraph mark that ends a section (section break) cannot be resolved by this skill."
+MARK_END_MSG = ("A paragraph mark that must be removed has no paragraph after it in the same story or table cell "
+                "(for example the last paragraph of the body). It cannot be resolved by this skill.")
+MARK_FORMAT_MSG = "A paragraph mark that must be removed belongs to a paragraph with a formatting change. It cannot be resolved by this skill."
+LINKED_FORMAT_MSG = ("A formatting change on a paragraph whose paragraph mark is also resolved must be selected too. "
+                     "Use --all, or select every revision on that paragraph.")
 LIBREOFFICE_MSG = "LibreOffice is not installed. Install it or convert the file in Word."
 LOCKED_MSG = "The file is open in another program. Close it and try again."
 REFUSE_INPUT_MSG = "Refusing to overwrite the input. Use --in-place to change it."
@@ -72,6 +78,11 @@ _CHANGE_TAGS = {
     "moveFrom": "move revision", "moveTo": "move revision",
 }
 _CONTENT_PARENTS = {"p", "hyperlink", "smartTag", "sdtContent", "customXml", "fldSimple", "dir", "bdo"}
+PARAGRAPH_MARK = "paragraph mark"
+# Children of a paragraph that hold no text and no visible content.
+_MARK_ONLY_TAGS = {W + "pPr", W + "bookmarkStart", W + "bookmarkEnd", W + "commentRangeStart",
+                   W + "commentRangeEnd", W + "proofErr", W + "permStart", W + "permEnd"}
+_FORMAT_CHANGE_TAGS = {W + "pPrChange", W + "rPrChange", W + "sectPrChange"}
 
 
 class ToolError(Exception):
@@ -407,10 +418,17 @@ def _classify(el, local: str):
     parent_local = etree.QName(parent).localname if parent is not None else ""
     if parent_local in _CONTENT_PARENTS:
         return ("insert" if local == "ins" else "delete"), None
-    if parent_local == "rPr" and parent.getparent() is not None \
-            and etree.QName(parent.getparent()).localname == "pPr":
-        return "unsupported", "paragraph mark revision"
+    if is_paragraph_mark(el):
+        return ("insert" if local == "ins" else "delete"), PARAGRAPH_MARK
     return "unsupported", f"revision mark inside w:{parent_local}"
+
+
+def is_paragraph_mark(el) -> bool:
+    """True for a w:ins or w:del that marks a paragraph mark (inside w:pPr/w:rPr)."""
+    parent = el.getparent()
+    return (parent is not None and etree.QName(parent).localname == "rPr"
+            and parent.getparent() is not None
+            and etree.QName(parent.getparent()).localname == "pPr")
 
 
 def _revision_text(el, kind: str) -> str:
@@ -533,6 +551,126 @@ def apply_revision(el, kind: str, mode: str) -> None:
         for node in list(el.iter(W + "delText")):
             node.tag = W + "t"
     _unwrap(el)
+
+
+def _paragraph_has_content(p) -> bool:
+    """True when the paragraph holds anything besides its properties and empty markers."""
+    for child in p:
+        if not isinstance(child.tag, str) or child.tag in _MARK_ONLY_TAGS:
+            continue
+        if child.tag == W + "r" and all(c.tag == W + "rPr" for c in child):
+            continue
+        return True
+    return False
+
+
+def _has_format_change(el) -> bool:
+    return any(node.tag in _FORMAT_CHANGE_TAGS for node in el.iter())
+
+
+def _take_properties(target, source_ppr) -> None:
+    """Give `target` the paragraph properties of `source_ppr` (None means none).
+
+    The target keeps its own mark properties (w:rPr) and section properties (w:sectPr), so a
+    tracked mark that belongs to the target survives.
+    """
+    old = target.find(W + "pPr")
+    new = etree.Element(W + "pPr")
+    if source_ppr is not None:
+        for child in list(source_ppr):
+            if child.tag not in (W + "rPr", W + "sectPr"):
+                new.append(child)
+    if old is not None:
+        for tag in (W + "rPr", W + "sectPr"):
+            child = old.find(tag)
+            if child is not None:
+                new.append(child)
+        target.remove(old)
+    if len(new):
+        target.insert(0, new)
+
+
+def _merge_into_next(p, first_props: bool) -> None:
+    """Remove the paragraph mark of `p`: its content moves to the start of the next paragraph.
+
+    Word's rules, checked against Word's own Accept All and Reject All:
+    - accepting a deleted mark: when `p` still has content, the merged paragraph takes the
+      properties of `p`; when `p` is empty, it is simply removed and the next paragraph keeps its own.
+    - rejecting an inserted mark: the merged paragraph keeps the properties of the next paragraph.
+    Refuses (nothing is written) when the merge cannot be done safely.
+    """
+    ppr = p.find(W + "pPr")
+    if ppr is not None and ppr.find(W + "sectPr") is not None:
+        raise ToolError(2, MARK_SECTION_MSG)
+    nxt = p.getnext()
+    if nxt is None or nxt.tag != W + "p":
+        raise ToolError(2, MARK_END_MSG)
+    npr = nxt.find(W + "pPr")
+    if any(_has_format_change(x) for x in (ppr, npr) if x is not None):
+        raise ToolError(2, MARK_FORMAT_MSG)
+    content = [c for c in p if c.tag != W + "pPr"]
+    if first_props and _paragraph_has_content(p):
+        _take_properties(nxt, ppr)
+    npr = nxt.find(W + "pPr")
+    position = nxt.index(npr) + 1 if npr is not None else 0
+    for child in content:
+        nxt.insert(position, child)
+        position += 1
+    p.getparent().remove(p)
+
+
+def linked_format_changes(mark_revs) -> list:
+    """Paragraph-property changes (w:pPrChange) on a paragraph whose mark is resolved, or on the
+    paragraph after it. Word writes these when a mark is deleted and the merged paragraph's
+    formatting changes; they are resolved together with the mark and nothing else is."""
+    found: list = []
+    for rev in mark_revs:
+        p = rev.el.getparent().getparent().getparent()
+        for para in (p, p.getnext()):
+            if para is None or para.tag != W + "p":
+                continue
+            ppr = para.find(W + "pPr")
+            change = ppr.find(W + "pPrChange") if ppr is not None else None
+            if change is not None and not any(change is x for x in found):
+                found.append(change)
+    return found
+
+
+def apply_format_change(change, mode: str) -> None:
+    """Accept or reject one w:pPrChange: accept keeps the current properties, reject restores the old."""
+    ppr = change.getparent()
+    if mode == "accept":
+        ppr.remove(change)
+        return
+    old = change.find(W + "pPr")
+    if old is not None and old.find(W + "sectPr") is not None:
+        raise ToolError(2, UNSUPPORTED_MSG)
+    ppr.remove(change)
+    keep_rpr = ppr.find(W + "rPr")
+    keep_sect = ppr.find(W + "sectPr")
+    for child in list(ppr):
+        ppr.remove(child)
+    for child in (list(old) if old is not None else []):
+        if child.tag != W + "rPr":
+            ppr.append(child)
+    if keep_rpr is not None:
+        ppr.append(keep_rpr)
+    if keep_sect is not None:
+        ppr.append(keep_sect)
+
+
+def apply_paragraph_mark(el, kind: str, mode: str) -> None:
+    """Resolve one paragraph-mark revision (a w:ins or w:del inside w:pPr/w:rPr)."""
+    keep = (kind == "insert" and mode == "accept") or (kind == "delete" and mode == "reject")
+    rpr = el.getparent()
+    ppr = rpr.getparent()
+    p = ppr.getparent()
+    if keep:  # the paragraph mark stays; only the revision marker goes
+        rpr.remove(el)
+        if len(rpr) == 0:
+            ppr.remove(rpr)
+        return
+    _merge_into_next(p, first_props=(kind == "delete"))
 
 
 # ------------------------------------------------------------ comment helpers
@@ -1017,25 +1155,44 @@ def cmd_track_resolve(args) -> None:
             if not any(r.rid == rid for r in revs):
                 raise ToolError(1, f"No tracked change with id {rid}.")
         selected = [r for r in revs if r.rid in args.ids]
-    if any(r.kind == "unsupported" for r in selected):
+    plain_marks = [r for r in selected if r.kind != "unsupported" and is_paragraph_mark(r.el)]
+    linked = linked_format_changes(plain_marks)
+    selected_els = {id(r.el) for r in selected}
+    if any(id(el) not in selected_els for el in linked):
+        raise ToolError(2, LINKED_FORMAT_MSG)
+    linked_ids = {id(el) for el in linked}
+    if any(r.kind == "unsupported" and id(r.el) not in linked_ids for r in selected):
         raise ToolError(2, UNSUPPORTED_MSG)
     plain_total = sum(1 for r in revs if r.kind != "unsupported")
-    expected_remaining = plain_total - len(selected)
+    expected_remaining = plain_total - sum(1 for r in selected if r.kind != "unsupported")
+    unsupported_left = sum(1 for r in revs if r.kind == "unsupported") - len(linked)
     body = doc.element.body
     comments = comments_root(doc)
     had_text = _comments_with_content(body)
+    # Text revisions first, then comments, then paragraph marks: a paragraph mark is removed only
+    # when its paragraph is empty, so the marks must be judged after the text is settled.
     for rev in selected:
-        apply_revision(rev.el, rev.kind, args.mode)
+        if rev.kind != "unsupported" and not is_paragraph_mark(rev.el):
+            apply_revision(rev.el, rev.kind, args.mode)
     # Word drops a comment whose range loses all its text in Accept or Reject (for example a
     # comment on text that is deleted and then accepted). Do the same, so both agree.
     for cid in sorted(had_text - _comments_with_content(body)):
         _drop_comment(body, comments, cid)
+    for el in linked:
+        apply_format_change(el, args.mode)
+    for rev in plain_marks:
+        apply_paragraph_mark(rev.el, rev.kind, args.mode)
 
     def verify(tmp: Path):
         again = reopen(tmp)
-        remaining = sum(1 for r in scan_revisions(story_roots(again)) if r.kind != "unsupported")
+        after = scan_revisions(story_roots(again))
+        remaining = sum(1 for r in after if r.kind != "unsupported")
         if remaining != expected_remaining:
             raise VerifyError(f"{remaining} tracked changes remain, expected {expected_remaining}")
+        left_unsupported = sum(1 for r in after if r.kind == "unsupported")
+        if left_unsupported != unsupported_left:
+            raise VerifyError(f"{left_unsupported} formatting or other unsupported changes remain, "
+                              f"expected {unsupported_left}")
         return {"remaining": remaining}
 
     info = finalize(doc, target, verify)

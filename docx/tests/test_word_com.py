@@ -414,6 +414,112 @@ def _build_insert_comment(session: WordSession, path: Path):
         doc.Close(WD_DO_NOT_SAVE)
 
 
+def _build_pm_insert(session: WordSession, path: Path):
+    """Inserted paragraphs: typed at the end, several typed in the middle, one inserted by paragraph
+    after the first line, and one at the start. Each new paragraph has its mark marked as inserted."""
+    app = session.app
+    doc = app.Documents.Add()
+    try:
+        doc.Content.Text = "Opening line.\rMiddle line.\rClosing line."
+        doc.TrackRevisions = True
+        _set_author(session, ANA)
+        last = doc.Paragraphs.Item(3).Range
+        last.MoveEnd(1, -1)
+        last.Collapse(WD_COLLAPSE_END)
+        last.InsertAfter("\rInserted at end.")
+        middle = doc.Paragraphs.Item(2).Range
+        middle.MoveEnd(1, -1)
+        middle.Collapse(WD_COLLAPSE_END)
+        middle.InsertAfter("\rFirst new line.\rSecond new line.")
+        doc.Paragraphs.Item(1).Range.InsertParagraphAfter()
+        doc.Paragraphs.Item(2).Range.InsertBefore("Inserted after opening.")
+        doc.Paragraphs.Item(1).Range.InsertParagraphBefore()
+        doc.Paragraphs.Item(1).Range.InsertBefore("Inserted at start.")
+        doc.TrackRevisions = False
+        doc.SaveAs2(str(path), FileFormat=WD_FORMAT_DOCX)
+    finally:
+        doc.Close(WD_DO_NOT_SAVE)
+
+
+def _build_pm_cell(session: WordSession, path: Path):
+    """Inserted paragraphs inside table cells, and a whole paragraph deleted inside a cell."""
+    app = session.app
+    doc = app.Documents.Add()
+    try:
+        doc.Content.Text = "Before the table."
+        end = doc.Paragraphs.Item(1).Range
+        end.Collapse(WD_COLLAPSE_END)
+        table = doc.Tables.Add(end, 2, 2)
+        table.Cell(1, 1).Range.Text = "Cell A"
+        table.Cell(1, 2).Range.Text = "Cell B"
+        table.Cell(2, 1).Range.Text = "Keep\rDrop"
+        table.Cell(2, 2).Range.Text = "Other"
+        doc.TrackRevisions = True
+        _set_author(session, ANA)
+        table.Cell(1, 1).Range.Paragraphs.Item(1).Range.InsertParagraphAfter()
+        table.Cell(1, 1).Range.Paragraphs.Item(2).Range.InsertBefore("Inserted in cell A.")
+        r = table.Cell(1, 2).Range
+        r.MoveEnd(1, -1)
+        r.Collapse(WD_COLLAPSE_END)
+        r.InsertAfter("\rTyped in cell B.")
+        _set_author(session, BEN)
+        table.Cell(2, 1).Range.Paragraphs.Item(1).Range.Delete()
+        doc.TrackRevisions = False
+        doc.SaveAs2(str(path), FileFormat=WD_FORMAT_DOCX)
+    finally:
+        doc.Close(WD_DO_NOT_SAVE)
+
+
+def _build_pm_delete(session: WordSession, path: Path):
+    """Whole paragraphs deleted (a heading and a body paragraph), a paragraph mark deleted so that
+    a heading merges with the next paragraph, and the last paragraph's text deleted."""
+    app = session.app
+    doc = app.Documents.Add()
+    try:
+        doc.Content.Text = ("Intro text.\rOld heading\rOld body paragraph.\rTitle line\r"
+                            "Body under title.\rLast words.")
+        doc.Paragraphs.Item(2).Style = -2  # Heading 1, set before tracking
+        doc.Paragraphs.Item(4).Style = -2
+        doc.TrackRevisions = True
+        _set_author(session, BEN)
+        doc.Paragraphs.Item(6).Range.Delete()
+        mark = doc.Paragraphs.Item(4).Range
+        doc.Range(mark.End - 1, mark.End).Delete()
+        doc.Paragraphs.Item(3).Range.Delete()
+        doc.Paragraphs.Item(2).Range.Delete()
+        doc.TrackRevisions = False
+        doc.SaveAs2(str(path), FileFormat=WD_FORMAT_DOCX)
+    finally:
+        doc.Close(WD_DO_NOT_SAVE)
+
+
+def _build_pm_mix(session: WordSession, path: Path):
+    """A heading split by a tracked paragraph break (the second part restyled without tracking),
+    a whole paragraph deleted, and a paragraph typed at the end."""
+    app = session.app
+    doc = app.Documents.Add()
+    try:
+        doc.Content.Text = "Section one\rRest of the body.\rThird line."
+        doc.Paragraphs.Item(1).Style = -2
+        doc.TrackRevisions = True
+        _set_author(session, ANA)
+        start = doc.Paragraphs.Item(1).Range.Start
+        doc.Range(start + 7, start + 7).InsertAfter("\r")
+        doc.TrackRevisions = False
+        doc.Paragraphs.Item(2).Style = -1  # Normal, set without tracking
+        doc.TrackRevisions = True
+        _set_author(session, BEN)
+        last = doc.Paragraphs.Item(4).Range
+        last.MoveEnd(1, -1)
+        last.Collapse(WD_COLLAPSE_END)
+        last.InsertAfter("\rFourth line.")
+        doc.Paragraphs.Item(3).Range.Delete()
+        doc.TrackRevisions = False
+        doc.SaveAs2(str(path), FileFormat=WD_FORMAT_DOCX)
+    finally:
+        doc.Close(WD_DO_NOT_SAVE)
+
+
 FIXTURES = {
     "word_track.docx": _build_track,
     "word_comments.docx": _build_comments,
@@ -423,11 +529,20 @@ FIXTURES = {
     "word_insert_comment.docx": _build_insert_comment,
 }
 
+# Paragraph-mark cases. Kept apart from FIXTURES because read and summary do not join a paragraph
+# whose mark is deleted (Word's final view does), so only the resolve checks use these.
+PM_FIXTURES = {
+    "word_pm_insert.docx": _build_pm_insert,
+    "word_pm_cell.docx": _build_pm_cell,
+    "word_pm_delete.docx": _build_pm_delete,
+    "word_pm_mix.docx": _build_pm_mix,
+}
+
 
 def build_fixtures(session: WordSession, folder: Path) -> dict[str, Path]:
     folder.mkdir(parents=True, exist_ok=True)
     made = {}
-    for name, builder in FIXTURES.items():
+    for name, builder in {**FIXTURES, **PM_FIXTURES}.items():
         path = folder / name
         builder(session, path)
         made[name] = path
@@ -557,15 +672,17 @@ def test_track_show_matches_word(word, word_files, copy_of, name):
 
 def test_track_show_word_fmt_counts(word, word_files, copy_of):
     """Word merges a new paragraph and its text into one revision; the tool lists the paragraph mark
-    as its own unsupported row (spec section 1). Plain rows must still agree with Word."""
+    as its own row (detail "paragraph mark"). The other rows must still agree with Word."""
     src = copy_of(word_files["word_fmt.docx"])
     rows = tool_json(src.parent, "track-show", "--json", src)["revisions"]
     with word_doc(word, src) as doc:
         word_rows = word_revisions(doc)
-    plain = sorted((r["kind"], r["author"], r["text"]) for r in rows if r["kind"] != "unsupported")
+    plain = sorted((r["kind"], r["author"], r["text"]) for r in rows
+                   if r["kind"] != "unsupported" and r["detail"] != "paragraph mark")
     assert plain == word_plain_revisions(word_rows)
     details = sorted(r["detail"] for r in rows if r["kind"] == "unsupported")
-    assert details == ["formatting change", "paragraph mark revision"]
+    assert details == ["formatting change"]
+    assert [r["kind"] for r in rows if r["detail"] == "paragraph mark"] == ["insert"]
     assert [t for t, _a, _x in word_rows].count(WD_REVISION_PROPERTY) == 1
 
 
@@ -808,6 +925,64 @@ def test_comment_added_across_insertion_matches_word_own(word, word_files, copy_
     assert resolved.returncode == 0, resolved.stderr
     comments_list = tool_json(tmp_path, "comments-list", "--json", out)["comments"]
     assert_resolved_like_word(word, out, comments_list, expected)
+
+
+# ------------------------------------------------------- paragraph-mark revisions
+
+def word_paragraph_rows(doc, final: bool = True) -> list[tuple[str, str]]:
+    """(text, style) of every paragraph in the main story in order, table cells included."""
+    _set_view(doc, final)
+    rows = []
+    for i in range(1, doc.Paragraphs.Count + 1):
+        p = doc.Paragraphs.Item(i)
+        rows.append((p.Range.Text, p.Style.NameLocal))
+    return rows
+
+
+def word_resolve_rows(session: WordSession, path: Path, accept: bool):
+    """Word's own Accept All or Reject All on an in-memory copy (nothing is saved)."""
+    doc = session.open_checked(path, read_only=False)
+    try:
+        for story in _stories(doc):
+            if accept:
+                story.Revisions.AcceptAll()
+            else:
+                story.Revisions.RejectAll()
+        return word_paragraph_rows(doc, True)
+    finally:
+        doc.Close(WD_DO_NOT_SAVE)
+
+
+def _mark_row(src: Path, tool_dir: Path, paragraph_index: int, kind: str) -> dict:
+    rows = tool_json(tool_dir, "track-show", "--json", src)["revisions"]
+    return next(r for r in rows if r["detail"] == "paragraph mark" and r["kind"] == kind
+                and r["paragraph_index"] == paragraph_index)
+
+
+@pytest.mark.parametrize("name", list(PM_FIXTURES))
+@pytest.mark.parametrize("mode", ["accept", "reject"])
+def test_paragraph_marks_resolve_like_word(word, word_files, copy_of, tmp_path, name, mode):
+    """Accept All / Reject All of the tool against Word's own, paragraph by paragraph (text and style)."""
+    src = copy_of(word_files[name])
+    expected = word_resolve_rows(word, src, accept=(mode == "accept"))
+    out = tmp_path / f"{mode}.docx"
+    result = run_tool(tmp_path, "track-resolve", src, "--mode", mode, "--all", "--out", out)
+    assert result.returncode == 0, result.stderr
+    with word_doc(word, out) as doc:
+        assert word_revisions(doc) == []
+        assert word_paragraph_rows(doc, True) == expected
+
+
+def test_mark_deletion_joined_with_format_change_needs_selection(word, word_files, copy_of, tmp_path):
+    """Word writes a formatting change on the paragraph after a deleted mark. Resolving only the
+    mark (not that change) is refused; --all resolves both."""
+    src = copy_of(word_files["word_pm_delete.docx"])
+    mark = _mark_row(src, tmp_path, paragraph_index=3, kind="delete")  # the "Title line" mark
+    out = tmp_path / "mark_only.docx"
+    result = run_tool(tmp_path, "track-resolve", src, "--mode", "accept", "--id", str(mark["id"]), "--out", out)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "must be selected too" in result.stderr
+    assert not out.exists()
 
 
 # ----------------------------------------------------------------- to-pdf through Word

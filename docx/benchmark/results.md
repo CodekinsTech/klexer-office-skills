@@ -1,11 +1,11 @@
 # DOCX v2 accuracy benchmark results
 
-- Run: 2026-10-25 02:30
+- Run: 2026-10-25 02:58
 - CLI under test: `<skill-folder>\docx\scripts\docx_tool.py`
-- Python: `<your-venv-folder>/venv-v2-docx-com/Scripts/python.exe` (Windows-10-10.0.26200-SP0)
-- Word found (with pywin32): yes
+- Python: `<your-venv-folder>\venv-v2-docx\Scripts\python.exe` (Windows-10-10.0.26200-SP0)
+- Word found (with pywin32): no
 - LibreOffice found: no
-- to-pdf variant used: word
+- to-pdf variant used: none
 - Expected results: written by hand from `specs/docx.md` and `docx/SKILL.md`, never taken from a run of the tool.
 
 ## Score: 30/30 passed
@@ -58,7 +58,7 @@ None.
 | V1 | validate | Validate a good file | PASS | 0 / 0 |
 | V2 | corrupt-file | Validate a truncated file | PASS | 1 / 1 |
 | S1 | summary | Structure summary of a small report | PASS | 0 / 0 |
-| PDF1 | to-pdf | Convert to PDF with Word or LibreOffice, or refuse when neither is installed | PASS | 0 / 0 |
+| PDF1 | to-pdf | Convert to PDF with Word or LibreOffice, or refuse when neither is installed | PASS | 2 / 2 |
 | X1 | out-of-scope | Legacy .doc file is refused | PASS | 2 / 2 |
 | X2 | out-of-scope | Password-protected file is refused | PASS | 2 / 2 |
 | X3 | out-of-scope | Macro-enabled .docm is refused | PASS | 2 / 2 |

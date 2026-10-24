@@ -40,7 +40,7 @@ The Word checks need the same venv with pywin32 (`venv\Scripts\python.exe -m pip
 
     venv\Scripts\python.exe -m pytest tests\test_word_com.py -v
 
-They start Word through COM, build five Word-made files, run the write commands on them, and open each output in Word. A prompt from Word while it opens a file, or an exception from Word, fails the check. They take about three minutes. Word's `UseLocalUserInfo` option is set for the run so that revision and comment authors are the names the test uses; the old value is restored before Word quits.
+They start Word through COM, build ten Word-made files (six general, four paragraph-mark cases), run the write commands on them, and open each output in Word. A prompt from Word while it opens a file, or an exception from Word, fails the check. They take about three minutes. Word's `UseLocalUserInfo` option is set for the run so that revision and comment authors are the names the test uses; the old value is restored before Word quits.
 
 ## Decisions where the spec was open
 
@@ -67,12 +67,25 @@ Reading and matching
 - Table cell text in `read` joins the cell's paragraphs with a newline. Text mode turns those newlines into spaces so each row stays on one line.
 
 Tracked changes
-- Plain revisions are `w:ins` and `w:del` whose parent is paragraph content (`w:p`, `w:hyperlink`, `w:smartTag`, `w:sdtContent`, `w:customXml`, `w:fldSimple`, `w:dir`, `w:bdo`).
-- These are `unsupported` (never changed, exit 2 when chosen): formatting changes (`w:rPrChange`, `w:pPrChange`, `w:sectPrChange`, `w:tblPrChange`, `w:trPrChange`, `w:tcPrChange`, `w:tblGridChange`, `w:numberingChange`); paragraph-mark changes; changes to table rows and cells; moves (`w:moveFrom`, `w:moveTo`, text in `w:moveFrom` is hidden like a deletion and text in `w:moveTo` counts as an insertion); a revision nested inside another; and a revision with no valid `w:id`.
+- Plain revisions are `w:ins` and `w:del` whose parent is paragraph content (`w:p`, `w:hyperlink`, `w:smartTag`, `w:sdtContent`, `w:customXml`, `w:fldSimple`, `w:dir`, `w:bdo`). Paragraph-mark revisions (inside `w:pPr/w:rPr`) are plain too; see Paragraph marks.
+- These are `unsupported` (never changed, exit 2 when chosen): formatting changes (`w:rPrChange`, `w:pPrChange`, `w:sectPrChange`, `w:tblPrChange`, `w:trPrChange`, `w:tcPrChange`, `w:tblGridChange`, `w:numberingChange`), except the paragraph-property change that Word pairs with a paragraph-mark revision (see Paragraph marks below); changes to table rows and cells; moves (`w:moveFrom`, `w:moveTo`, text in `w:moveFrom` is hidden like a deletion and text in `w:moveTo` counts as an insertion); a revision nested inside another; and a revision with no valid `w:id`.
 - Revision ids are the `w:id` values. If two revisions share an id, `--id` selects both.
 - `track-resolve` checks that the number of plain revisions left equals the number not chosen.
-- A new paragraph typed with tracking on is one revision in Word: the paragraph mark and its text. Here the paragraph mark is a separate `unsupported` row, so `track-show` lists one more row than Word's count, and `track-resolve --all` refuses the file (spec section 2.6). Found with `word_fmt.docx`.
-- Accept and reject match Word's own Accept All and Reject All, including comments (`test_word_com.py`). Comment markers inside a removed element are moved out first. A comment whose text is all removed is dropped with its entry in `comments.xml`, because Word does the same.
+- A new paragraph typed with tracking on is one revision in Word: the paragraph mark and its text. Here the paragraph mark is its own row, so `track-show` lists one more row than Word's count. The mark row has `kind` `insert` (or `delete`), empty `text` and `detail` `paragraph mark`. Word's count is kept in the tests by leaving those rows out of the comparison.
+- Accept and reject match Word's own Accept All and Reject All, including comments (`test_word_com.py`).
+
+Paragraph marks
+- A paragraph mark revision is a `w:ins` or `w:del` inside `w:pPr/w:rPr`. Accepting an inserted mark or rejecting a deleted mark keeps the paragraph, and only the marker goes.
+- Removing a mark (rejecting an inserted mark, or accepting a deleted one) joins the paragraph with the next paragraph in the same story or table cell. The joined content moves to the start of the next paragraph. Word's rules, checked against Word's own Accept All and Reject All on Word-made files (`test_word_com.py`, `PM_FIXTURES`):
+  - A paragraph with no content left (for example a whole paragraph deleted with Track Changes) is removed. The next paragraph keeps its own properties.
+  - Accepting a deleted mark of a paragraph that still has text: the joined paragraph takes the first paragraph's properties (`Title` in Heading 1 plus `Body` in Normal gives `TitleBody` in Heading 1).
+  - Rejecting an inserted mark: the joined paragraph keeps the next paragraph's properties.
+- Word writes a paragraph-property change (`w:pPrChange`) with a mark deletion when the joined paragraph's formatting changes. That change is resolved together with the mark: accept drops it, reject restores the old properties. It is resolved only when it sits on a paragraph whose mark is in the same resolve, and it must be selected too (with `--all`, or with `--id` for both). Selecting only the mark is refused with exit 2 and the message "must be selected too".
+- Refused with exit 2 and nothing written (`cannot be resolved by this skill`):
+  - a mark that ends a section (a section break);
+  - a mark that must be removed with no paragraph after it in the same story or table cell (for example the last paragraph of the body);
+  - a formatting change on a paragraph involved in a mark removal that is not resolved with it;
+  - any other `unsupported` revision, as before (`rPrChange`, table row or cell changes, moves, nested revisions). Comment markers inside a removed element are moved out first. A comment whose text is all removed is dropped with its entry in `comments.xml`, because Word does the same.
 
 Summary
 - Headings come from paragraph styles named `Heading 1` to `Heading 9` (not `Title`).
@@ -133,7 +146,8 @@ Locks and writes
 ## Not done
 
 - LibreOffice conversion has not been run here (LibreOffice is not installed). Its branch runs only when Word is missing.
-- Word-made files: five files, built by Word through COM in `tests\test_word_com.py`, not by typing in the Word window. Only Word 16.0 was used. Word may write shapes these files do not cover (footnotes, text boxes, tracked moves). The hand-built XML tests in `test_docx_tool.py` remain.
+- `read`, `summary`, `replace` and `fill` do not join a paragraph whose mark is deleted. Word's final view shows such a paragraph joined with the next one, so `read` lists two paragraphs where Word shows one. This is why the four paragraph-mark fixtures are kept out of the read and summary checks. `track-resolve` handles them.
+- Word-made files: ten files, built by Word through COM in `tests\test_word_com.py`, not by typing in the Word window. Only Word 16.0 was used. Word may write shapes these files do not cover (footnotes, text boxes, tracked moves). The hand-built XML tests in `test_docx_tool.py` remain.
 - Footnotes, endnotes, comments (as text to search) and field codes are not searched. The report lists them.
 - Images, mail merge, and layout are not supported (out of scope in the spec).
 - Content controls are read and searched only as plain text. Their own properties are not handled.
@@ -143,5 +157,5 @@ Locks and writes
 
 ## Acceptance test results
 
-Run on Windows 11, Python 3.11.9, Word 16.0, python-docx 1.2.0, lxml 6.1.3, pypdf 6.21.2, pywin32 312, pytest 9.1.1: 65 tests pass (14 in `test_docx_tool.py`, 51 in `test_word_com.py`). The benchmark (`benchmark
+Run on Windows 11, Python 3.11.9, Word 16.0, python-docx 1.2.0, lxml 6.1.3, pypdf 6.21.2, pywin32 312, pytest 9.1.1: 85 tests pass (25 in `test_docx_tool.py`, 60 in `test_word_com.py`). The benchmark (`benchmark
 un_benchmark.py`, run with the venv that has pywin32) scores 30/30; its to-pdf task ran the Word variant.

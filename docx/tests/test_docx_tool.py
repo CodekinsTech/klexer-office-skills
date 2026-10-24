@@ -207,6 +207,237 @@ def test_track_resolve_unsupported(tmp_path):
     assert not (tmp_path / "t_fmt.track-resolve.docx").exists()
 
 
+def _mark(tag, rid):
+    """A paragraph-mark revision marker (w:ins or w:del with no content) for w:pPr/w:rPr."""
+    el = OxmlElement(f"w:{tag}")
+    el.set(qn("w:id"), str(rid))
+    el.set(qn("w:author"), "Ana")
+    el.set(qn("w:date"), "2026-10-01T09:00:00Z")
+    return el
+
+
+def _pm_para(doc, text="", *, style=None, mark=None, mark_id=None, content=None, content_id=None,
+             section=False, change_id=None):
+    """Append a paragraph. `mark` is "ins" or "del" for its paragraph mark; `content` is "ins" or
+    "del" to wrap the text in a tracked revision; `section` adds a section break; `change_id`
+    adds a paragraph-property change (w:pPrChange) whose old properties are empty."""
+    p = doc.add_paragraph()
+    if style:
+        p.style = style
+    ppr = p._p.get_or_add_pPr()
+    if mark:
+        rpr = OxmlElement("w:rPr")
+        rpr.append(_mark(mark, mark_id))
+        ppr.append(rpr)
+    if section:
+        ppr.append(OxmlElement("w:sectPr"))
+    if change_id is not None:
+        change = _mark("pPrChange", change_id)
+        change.append(OxmlElement("w:pPr"))
+        ppr.append(change)
+    if text and content:
+        p._p.append(_revision(content, content_id, "Ana", text, deleted=(content == "del")))
+    elif text:
+        run = OxmlElement("w:r")
+        node = OxmlElement("w:t")
+        node.text = text
+        node.set(qn("xml:space"), "preserve")
+        run.append(node)
+        p._p.append(run)
+    return p
+
+
+def _resolve(tmp_path, src, mode, *extra):
+    out = tmp_path / f"{mode}-{src.stem}.docx"
+    result = run_tool(tmp_path, "track-resolve", src, "--mode", mode, *extra, "--out", out)
+    return result, out
+
+
+def _paras(tmp_path, path):
+    return [(p["style"], p["text"]) for p in read_json(tmp_path, path)["paragraphs"]]
+
+
+def _assert_no_tracked_markup(path):
+    with __import__("zipfile").ZipFile(path) as zf:
+        root = etree.fromstring(zf.read("word/document.xml"))
+    assert root.findall(f".//{{{W_NS}}}ins") == []
+    assert root.findall(f".//{{{W_NS}}}del") == []
+
+
+def test_pm_insert_middle_accept_and_reject(tmp_path):
+    doc = Document()
+    _pm_para(doc, "Alpha")
+    _pm_para(doc, "New", mark="ins", mark_id=1, content="ins", content_id=2)
+    _pm_para(doc, "Beta")
+    src = tmp_path / "pm_mid.docx"
+    doc.save(src)
+    result, out = _resolve(tmp_path, src, "accept", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Normal", "Alpha"), ("Normal", "New"), ("Normal", "Beta")]
+    _assert_no_tracked_markup(out)
+    result, out = _resolve(tmp_path, src, "reject", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Normal", "Alpha"), ("Normal", "Beta")]
+    _assert_no_tracked_markup(out)
+
+
+def test_pm_insert_start_and_end_typed(tmp_path):
+    doc = Document()
+    _pm_para(doc, "Start", mark="ins", mark_id=1, content="ins", content_id=2)
+    _pm_para(doc, "Alpha")
+    _pm_para(doc, "Beta", mark="ins", mark_id=3)
+    _pm_para(doc, "End", content="ins", content_id=4)
+    src = tmp_path / "pm_edges.docx"
+    doc.save(src)
+    result, out = _resolve(tmp_path, src, "accept", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Normal", "Start"), ("Normal", "Alpha"),
+                                     ("Normal", "Beta"), ("Normal", "End")]
+    result, out = _resolve(tmp_path, src, "reject", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Normal", "Alpha"), ("Normal", "Beta")]
+    _assert_no_tracked_markup(out)
+
+
+def test_pm_insert_several_typed_reject(tmp_path):
+    doc = Document()
+    _pm_para(doc, "Alpha", mark="ins", mark_id=1)
+    _pm_para(doc, "N1", mark="ins", mark_id=2, content="ins", content_id=3)
+    _pm_para(doc, "N2", content="ins", content_id=4)
+    _pm_para(doc, "Beta")
+    src = tmp_path / "pm_several.docx"
+    doc.save(src)
+    result, out = _resolve(tmp_path, src, "accept", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Normal", "Alpha"), ("Normal", "N1"),
+                                     ("Normal", "N2"), ("Normal", "Beta")]
+    result, out = _resolve(tmp_path, src, "reject", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Normal", "Alpha"), ("Normal", "Beta")]
+
+
+def test_pm_whole_paragraph_delete_accept_and_reject(tmp_path):
+    doc = Document()
+    _pm_para(doc, "Alpha")
+    _pm_para(doc, "Old heading", style="Heading 1", mark="del", mark_id=1, content="del", content_id=2)
+    _pm_para(doc, "Old body", mark="del", mark_id=3, content="del", content_id=4)
+    _pm_para(doc, "Gamma")
+    src = tmp_path / "pm_whole_del.docx"
+    doc.save(src)
+    result, out = _resolve(tmp_path, src, "accept", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Normal", "Alpha"), ("Normal", "Gamma")]
+    result, out = _resolve(tmp_path, src, "reject", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Normal", "Alpha"), ("Heading 1", "Old heading"),
+                                     ("Normal", "Old body"), ("Normal", "Gamma")]
+    _assert_no_tracked_markup(out)
+
+
+def test_pm_mark_delete_keeps_first_paragraph_style(tmp_path):
+    """Word: accepting a deleted mark after a paragraph with text gives the merged paragraph the
+    first paragraph's style."""
+    doc = Document()
+    _pm_para(doc, "Title", style="Heading 1", mark="del", mark_id=1)
+    _pm_para(doc, "Body")
+    src = tmp_path / "pm_merge.docx"
+    doc.save(src)
+    result, out = _resolve(tmp_path, src, "accept", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Heading 1", "TitleBody")]
+    result, out = _resolve(tmp_path, src, "reject", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Heading 1", "Title"), ("Normal", "Body")]
+
+
+def test_pm_reject_inserted_mark_keeps_next_style(tmp_path):
+    """Word: rejecting an inserted mark restores the next paragraph's style."""
+    doc = Document()
+    _pm_para(doc, "Section", style="Heading 1", mark="ins", mark_id=1)
+    _pm_para(doc, " one")
+    src = tmp_path / "pm_split.docx"
+    doc.save(src)
+    result, out = _resolve(tmp_path, src, "reject", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Normal", "Section one")]
+    result, out = _resolve(tmp_path, src, "accept", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Heading 1", "Section"), ("Normal", " one")]
+
+
+def test_pm_linked_format_change_accept_and_reject(tmp_path):
+    """The paragraph after a deleted mark carries a formatting change (as Word writes it).
+    Accept keeps the new style, reject restores the old one, with --all."""
+    doc = Document()
+    _pm_para(doc, "Title", style="Heading 1", mark="del", mark_id=1)
+    _pm_para(doc, "Body", style="Heading 1", change_id=2)
+    src = tmp_path / "pm_linked.docx"
+    doc.save(src)
+    result, out = _resolve(tmp_path, src, "accept", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Heading 1", "TitleBody")]
+    _assert_no_tracked_markup(out)
+    result, out = _resolve(tmp_path, src, "reject", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Heading 1", "Title"), ("Normal", "Body")]
+    _assert_no_tracked_markup(out)
+
+
+def test_pm_linked_format_change_needs_selection(tmp_path):
+    doc = Document()
+    _pm_para(doc, "Title", style="Heading 1", mark="del", mark_id=1)
+    _pm_para(doc, "Body", style="Heading 1", change_id=2)
+    src = tmp_path / "pm_linked_one.docx"
+    doc.save(src)
+    result, out = _resolve(tmp_path, src, "accept", "--id", "1")
+    assert result.returncode == 2
+    assert "must be selected too" in result.stderr
+    assert not out.exists()
+
+
+def test_pm_section_break_refused_on_reject(tmp_path):
+    doc = Document()
+    _pm_para(doc, "Keep", mark="ins", mark_id=1, section=True)
+    _pm_para(doc, "After")
+    src = tmp_path / "pm_section.docx"
+    doc.save(src)
+    result, out = _resolve(tmp_path, src, "reject", "--all")
+    assert result.returncode == 2
+    assert "section" in result.stderr
+    assert not out.exists()
+    result, out = _resolve(tmp_path, src, "accept", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Normal", "Keep"), ("Normal", "After")]
+
+
+def test_pm_last_paragraph_mark_refused_on_reject(tmp_path):
+    doc = Document()
+    _pm_para(doc, "Alpha")
+    _pm_para(doc, "Beta", mark="ins", mark_id=1)
+    src = tmp_path / "pm_last.docx"
+    doc.save(src)
+    result, out = _resolve(tmp_path, src, "reject", "--all")
+    assert result.returncode == 2
+    assert "no paragraph after it" in result.stderr
+    assert not out.exists()
+    result, out = _resolve(tmp_path, src, "accept", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Normal", "Alpha"), ("Normal", "Beta")]
+
+
+def test_pm_track_show_lists_paragraph_marks(tmp_path):
+    doc = Document()
+    _pm_para(doc, "Alpha")
+    _pm_para(doc, "New", mark="ins", mark_id=1, content="ins", content_id=2)
+    _pm_para(doc, "Beta")
+    src = tmp_path / "pm_show.docx"
+    doc.save(src)
+    result = run_tool(tmp_path, "track-show", "--json", src)
+    assert result.returncode == 0, result.stderr
+    listed = json.loads(result.stdout)["revisions"]
+    assert sorted((r["kind"], r["detail"] or "") for r in listed) == [("insert", ""), ("insert", "paragraph mark")]
+
+
 def test_comments_add(tmp_path):
     make_replace_doc(tmp_path / "t_rep.docx")
     result = run_tool(tmp_path, "comments-add", "t_rep.docx", "--anchor", "signed",
