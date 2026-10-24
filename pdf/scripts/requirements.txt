@@ -1,0 +1,14 @@
+# Runtime (used by pdf_tool.py)
+pypdf==6.21.2          # BSD-3-Clause
+pdfplumber==0.11.10    # MIT (pulls in pdfminer.six, MIT)
+reportlab==5.1.0       # BSD
+cryptography==50.0.2   # Apache-2.0 OR BSD-3-Clause (AES decryption for pypdf)
+
+# Installed in the build venv as the brief asked; not imported by pdf_tool.py.
+# pypdfium2 and Pillow are pulled in by pdfplumber anyway. lxml is not used.
+pypdfium2==5.14.0      # Apache-2.0 / BSD-3-Clause
+Pillow==13.0.0         # MIT-CMU
+lxml==6.1.3           # BSD-3-Clause
+
+# Tests only
+pytest==9.1.1         # MIT
