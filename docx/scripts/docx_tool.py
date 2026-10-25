@@ -45,7 +45,9 @@ LEGACY_MSG = "Legacy .doc is not supported. Save the file as .docx and try again
 PASSWORD_MSG = "This Word file is password-protected. The skill does not open protected files."
 MACRO_MSG = "Macro-enabled .docm files are not supported. Save as .docx (macros are dropped)."
 UNSUPPORTED_MSG = "Formatting tracked changes cannot be resolved by this skill."
-MARK_SECTION_MSG = "A paragraph mark that ends a section (section break) cannot be resolved by this skill."
+SECTION_LAYOUT_MSG = ("A section break whose section properties differ from the section after it cannot be "
+                      "resolved by this skill. Its page layout would change when the break is removed.")
+SECTION_CHANGE_MSG = "A tracked change to section properties cannot be resolved by this skill."
 MARK_END_MSG = ("A paragraph mark that must be removed has no paragraph after it in the same story or table cell "
                 "(for example the last paragraph of the body). It cannot be resolved by this skill.")
 MARK_FORMAT_MSG = "A paragraph mark that must be removed belongs to a paragraph with a formatting change. It cannot be resolved by this skill."
@@ -590,24 +592,75 @@ def _take_properties(target, source_ppr) -> None:
         target.insert(0, new)
 
 
-def _merge_into_next(p, first_props: bool) -> None:
+_SECTION_REFS = (W + "headerReference", W + "footerReference")
+
+
+def _section_elements(body) -> list:
+    """Every section properties element of the body in document order: the ones held by a
+    paragraph (w:pPr/w:sectPr) and the body's own (the last section). Revision copies are skipped."""
+    return [el for el in body.iter(W + "sectPr")
+            if el.getparent() is not None and etree.QName(el.getparent()).localname in ("pPr", "body")]
+
+
+def _following_section(section):
+    """The section properties of the section after `section`, or None when there is none."""
+    sections = _section_elements(section.getroottree().getroot())
+    index = next(i for i, el in enumerate(sections) if el is section)
+    return sections[index + 1] if index + 1 < len(sections) else None
+
+
+def _shape(el):
+    """Tag, attributes (without rsid revision ids), text and children of an element, as plain values."""
+    attrs = tuple(sorted((k, v) for k, v in el.attrib.items() if not etree.QName(k).localname.startswith("rsid")))
+    children = tuple(_shape(c) for c in el if isinstance(c.tag, str))
+    return (el.tag, attrs, (el.text or "").strip(), children)
+
+
+def _layout_of(section) -> tuple:
+    """The page layout of a section: its properties without the start type (w:type), the header and
+    footer references and the revision ids (rsid). Two sections with equal layouts print alike."""
+    own = tuple(sorted((k, v) for k, v in section.attrib.items() if not etree.QName(k).localname.startswith("rsid")))
+    parts = [c for c in section if isinstance(c.tag, str) and c.tag not in _SECTION_REFS and c.tag != W + "type"]
+    return own, tuple(_shape(c) for c in parts)
+
+
+def _take_section_break(section) -> None:
+    """Prepare the removal of a section break (the w:sectPr of a removed paragraph mark).
+
+    The section after the break keeps its own properties, as Word does. Its header and footer
+    references are taken from the break when it has none. Refuses when the two layouts differ,
+    because removing the break would change the page layout of the merged section.
+    """
+    following = _following_section(section)
+    if following is None or _layout_of(section) != _layout_of(following):
+        raise ToolError(2, SECTION_LAYOUT_MSG)
+    if not any(child.tag in _SECTION_REFS for child in following):
+        for position, ref in enumerate(c for c in section if c.tag in _SECTION_REFS):
+            following.insert(position, copy.deepcopy(ref))
+
+
+def _merge_into_next(p, first_props: bool) -> bool:
     """Remove the paragraph mark of `p`: its content moves to the start of the next paragraph.
 
     Word's rules, checked against Word's own Accept All and Reject All:
     - accepting a deleted mark: when `p` still has content, the merged paragraph takes the
       properties of `p`; when `p` is empty, it is simply removed and the next paragraph keeps its own.
     - rejecting an inserted mark: the merged paragraph keeps the properties of the next paragraph.
+    - a mark that ends a section (w:sectPr in its paragraph): the section after it keeps its own
+      properties (see `_take_section_break`), so the break's section is simply dropped.
     Refuses (nothing is written) when the merge cannot be done safely.
+    Returns True when the removed paragraph held a section break.
     """
     ppr = p.find(W + "pPr")
-    if ppr is not None and ppr.find(W + "sectPr") is not None:
-        raise ToolError(2, MARK_SECTION_MSG)
     nxt = p.getnext()
     if nxt is None or nxt.tag != W + "p":
         raise ToolError(2, MARK_END_MSG)
     npr = nxt.find(W + "pPr")
     if any(_has_format_change(x) for x in (ppr, npr) if x is not None):
         raise ToolError(2, MARK_FORMAT_MSG)
+    section = ppr.find(W + "sectPr") if ppr is not None else None
+    if section is not None:
+        _take_section_break(section)
     content = [c for c in p if c.tag != W + "pPr"]
     if first_props and _paragraph_has_content(p):
         _take_properties(nxt, ppr)
@@ -617,6 +670,7 @@ def _merge_into_next(p, first_props: bool) -> None:
         nxt.insert(position, child)
         position += 1
     p.getparent().remove(p)
+    return section is not None
 
 
 def linked_format_changes(mark_revs) -> list:
@@ -659,8 +713,10 @@ def apply_format_change(change, mode: str) -> None:
         ppr.append(keep_sect)
 
 
-def apply_paragraph_mark(el, kind: str, mode: str) -> None:
-    """Resolve one paragraph-mark revision (a w:ins or w:del inside w:pPr/w:rPr)."""
+def apply_paragraph_mark(el, kind: str, mode: str) -> bool:
+    """Resolve one paragraph-mark revision (a w:ins or w:del inside w:pPr/w:rPr).
+
+    Returns True when the mark was removed and its paragraph held a section break."""
     keep = (kind == "insert" and mode == "accept") or (kind == "delete" and mode == "reject")
     rpr = el.getparent()
     ppr = rpr.getparent()
@@ -669,8 +725,8 @@ def apply_paragraph_mark(el, kind: str, mode: str) -> None:
         rpr.remove(el)
         if len(rpr) == 0:
             ppr.remove(rpr)
-        return
-    _merge_into_next(p, first_props=(kind == "delete"))
+        return False
+    return _merge_into_next(p, first_props=(kind == "delete"))
 
 
 # ------------------------------------------------------------ comment helpers
@@ -1161,7 +1217,10 @@ def cmd_track_resolve(args) -> None:
     if any(id(el) not in selected_els for el in linked):
         raise ToolError(2, LINKED_FORMAT_MSG)
     linked_ids = {id(el) for el in linked}
-    if any(r.kind == "unsupported" and id(r.el) not in linked_ids for r in selected):
+    blocked = [r for r in selected if r.kind == "unsupported" and id(r.el) not in linked_ids]
+    if blocked:
+        if any(etree.QName(r.el).localname == "sectPrChange" for r in blocked):
+            raise ToolError(2, SECTION_CHANGE_MSG)
         raise ToolError(2, UNSUPPORTED_MSG)
     plain_total = sum(1 for r in revs if r.kind != "unsupported")
     expected_remaining = plain_total - sum(1 for r in selected if r.kind != "unsupported")
@@ -1169,6 +1228,7 @@ def cmd_track_resolve(args) -> None:
     body = doc.element.body
     comments = comments_root(doc)
     had_text = _comments_with_content(body)
+    sections_before = len(_section_elements(body))
     # Text revisions first, then comments, then paragraph marks: a paragraph mark is removed only
     # when its paragraph is empty, so the marks must be judged after the text is settled.
     for rev in selected:
@@ -1180,8 +1240,11 @@ def cmd_track_resolve(args) -> None:
         _drop_comment(body, comments, cid)
     for el in linked:
         apply_format_change(el, args.mode)
+    sections_removed = 0
     for rev in plain_marks:
-        apply_paragraph_mark(rev.el, rev.kind, args.mode)
+        if apply_paragraph_mark(rev.el, rev.kind, args.mode):
+            sections_removed += 1
+    expected_sections = sections_before - sections_removed
 
     def verify(tmp: Path):
         again = reopen(tmp)
@@ -1193,6 +1256,9 @@ def cmd_track_resolve(args) -> None:
         if left_unsupported != unsupported_left:
             raise VerifyError(f"{left_unsupported} formatting or other unsupported changes remain, "
                               f"expected {unsupported_left}")
+        sections = len(_section_elements(again.element.body))
+        if sections != expected_sections:
+            raise VerifyError(f"{sections} sections remain, expected {expected_sections}")
         return {"remaining": remaining}
 
     info = finalize(doc, target, verify)

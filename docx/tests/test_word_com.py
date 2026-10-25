@@ -61,6 +61,8 @@ WD_ALERTS_ALL = -1
 WD_FORMAT_DOCX = 16
 WD_FORMAT_PDF = 17
 WD_DO_NOT_SAVE = 0
+WD_SECTION_BREAK_CONTINUOUS = 3
+WD_SECTION_BREAK_NEXT_PAGE = 2
 
 ANA = "Ana Lopez"
 BEN = "Ben Ortiz"
@@ -520,6 +522,116 @@ def _build_pm_mix(session: WordSession, path: Path):
         doc.Close(WD_DO_NOT_SAVE)
 
 
+@contextmanager
+def _smart_cut_off(app):
+    """Word's smart cut changes the spaces around a deletion; the section fixtures turn it off."""
+    old = app.Options.SmartCutPaste
+    app.Options.SmartCutPaste = False
+    try:
+        yield
+    finally:
+        app.Options.SmartCutPaste = old
+
+
+def _break_after(doc, index: int, kind: int):
+    """A section break at the end of paragraph `index` (before its mark), as the Insert > Break does."""
+    r = doc.Paragraphs.Item(index).Range
+    r.MoveEnd(1, -1)
+    r.Collapse(WD_COLLAPSE_END)
+    r.InsertBreak(kind)
+
+
+def _sec_text(doc):
+    doc.Content.Text = "Alpha line.\rBeta line.\rGamma line."
+
+
+def _build_sec_ins(session: WordSession, path: Path, kind: int):
+    """A section break typed with Track Changes on: the break's paragraph mark is an insertion."""
+    app = session.app
+    doc = app.Documents.Add()
+    try:
+        with _smart_cut_off(app):
+            _sec_text(doc)
+            doc.TrackRevisions = True
+            _set_author(session, ANA)
+            _break_after(doc, 1, kind)
+            doc.TrackRevisions = False
+        doc.SaveAs2(str(path), FileFormat=WD_FORMAT_DOCX)
+    finally:
+        doc.Close(WD_DO_NOT_SAVE)
+
+
+def _build_sec_del(session: WordSession, path: Path, kind: int, *, header: str = "", both_headers: bool = False,
+                   heading: bool = False, landscape: bool = False, second_break: bool = False):
+    """An existing section break (made without tracking) whose paragraph mark is then deleted with
+    Track Changes on. `header` puts a header on the first section, `both_headers` also on the second
+    (unlinked), `heading` makes the paragraph before the break a Heading 1, `landscape` turns the first
+    section landscape without tracking, and `second_break` adds a continuous break after "Beta line."
+    and deletes only the first one."""
+    app = session.app
+    doc = app.Documents.Add()
+    try:
+        with _smart_cut_off(app):
+            _sec_text(doc)
+            if heading:
+                doc.Paragraphs.Item(1).Style = -2  # Heading 1, set without tracking
+            _break_after(doc, 1, kind)
+            if second_break:
+                _break_after(doc, 3, WD_SECTION_BREAK_CONTINUOUS)
+            if landscape:
+                doc.Sections.Item(1).PageSetup.Orientation = 1
+            if header:
+                doc.Sections.Item(1).Headers.Item(1).Range.Text = header
+            if both_headers:
+                doc.Sections.Item(2).Headers.Item(1).LinkToPrevious = False
+                doc.Sections.Item(2).Headers.Item(1).Range.Text = "Head B"
+            _set_author(session, BEN)
+            doc.TrackRevisions = True
+            doc.Paragraphs.Item(1).Range.Characters.Last.Delete()
+            doc.TrackRevisions = False
+        doc.SaveAs2(str(path), FileFormat=WD_FORMAT_DOCX)
+    finally:
+        doc.Close(WD_DO_NOT_SAVE)
+
+
+def _build_sec_ins_header_both(session: WordSession, path: Path):
+    """A section break inserted with tracking on, under a header on the first section; the second
+    section gets its own header without tracking."""
+    app = session.app
+    doc = app.Documents.Add()
+    try:
+        with _smart_cut_off(app):
+            _sec_text(doc)
+            doc.Sections.Item(1).Headers.Item(1).Range.Text = "Head A"
+            doc.TrackRevisions = True
+            _set_author(session, ANA)
+            _break_after(doc, 1, WD_SECTION_BREAK_NEXT_PAGE)
+            doc.TrackRevisions = False
+            doc.Sections.Item(2).Headers.Item(1).LinkToPrevious = False
+            doc.Sections.Item(2).Headers.Item(1).Range.Text = "Head B"
+        doc.SaveAs2(str(path), FileFormat=WD_FORMAT_DOCX)
+    finally:
+        doc.Close(WD_DO_NOT_SAVE)
+
+
+def _build_sec_tracked_margin(session: WordSession, path: Path):
+    """A section break (no tracking), then a margin change on the second section with Track Changes
+    on: Word records a tracked change to the section properties."""
+    app = session.app
+    doc = app.Documents.Add()
+    try:
+        with _smart_cut_off(app):
+            _sec_text(doc)
+            _break_after(doc, 1, WD_SECTION_BREAK_NEXT_PAGE)
+            doc.TrackRevisions = True
+            _set_author(session, BEN)
+            doc.Sections.Item(2).PageSetup.LeftMargin = 90
+            doc.TrackRevisions = False
+        doc.SaveAs2(str(path), FileFormat=WD_FORMAT_DOCX)
+    finally:
+        doc.Close(WD_DO_NOT_SAVE)
+
+
 FIXTURES = {
     "word_track.docx": _build_track,
     "word_comments.docx": _build_comments,
@@ -538,11 +650,35 @@ PM_FIXTURES = {
     "word_pm_mix.docx": _build_pm_mix,
 }
 
+# Section-break cases (tracked section breaks in the body). Word's own Accept All and Reject All
+# are compared with the tool's output for each. REFUSED_SECTION lists the cases the tool must refuse.
+SECTION_FIXTURES = {
+    "word_sec_ins_next.docx": lambda s, p: _build_sec_ins(s, p, WD_SECTION_BREAK_NEXT_PAGE),
+    "word_sec_ins_cont.docx": lambda s, p: _build_sec_ins(s, p, WD_SECTION_BREAK_CONTINUOUS),
+    "word_sec_del_next.docx": lambda s, p: _build_sec_del(s, p, WD_SECTION_BREAK_NEXT_PAGE),
+    "word_sec_del_cont.docx": lambda s, p: _build_sec_del(s, p, WD_SECTION_BREAK_CONTINUOUS),
+    "word_sec_del_two.docx": lambda s, p: _build_sec_del(s, p, WD_SECTION_BREAK_NEXT_PAGE, second_break=True),
+    "word_sec_del_heading.docx": lambda s, p: _build_sec_del(s, p, WD_SECTION_BREAK_NEXT_PAGE, heading=True),
+    "word_sec_del_header_a.docx": lambda s, p: _build_sec_del(s, p, WD_SECTION_BREAK_NEXT_PAGE, header="Head A"),
+    "word_sec_del_header_both.docx": lambda s, p: _build_sec_del(
+        s, p, WD_SECTION_BREAK_NEXT_PAGE, header="Head A", both_headers=True),
+    "word_sec_ins_header_both.docx": _build_sec_ins_header_both,
+    "word_sec_del_landscape.docx": lambda s, p: _build_sec_del(
+        s, p, WD_SECTION_BREAK_NEXT_PAGE, landscape=True),
+    "word_sec_margin_tracked.docx": _build_sec_tracked_margin,
+}
+
+REFUSED_SECTION = {
+    ("word_sec_del_landscape.docx", "accept"): "section properties differ",
+    ("word_sec_margin_tracked.docx", "accept"): "tracked change to section properties",
+    ("word_sec_margin_tracked.docx", "reject"): "tracked change to section properties",
+}
+
 
 def build_fixtures(session: WordSession, folder: Path) -> dict[str, Path]:
     folder.mkdir(parents=True, exist_ok=True)
     made = {}
-    for name, builder in {**FIXTURES, **PM_FIXTURES}.items():
+    for name, builder in {**FIXTURES, **PM_FIXTURES, **SECTION_FIXTURES}.items():
         path = folder / name
         builder(session, path)
         made[name] = path
@@ -983,6 +1119,50 @@ def test_mark_deletion_joined_with_format_change_needs_selection(word, word_file
     assert result.returncode == 2, result.stdout + result.stderr
     assert "must be selected too" in result.stderr
     assert not out.exists()
+
+
+# ------------------------------------------------------------- section breaks
+
+def word_section_rows(doc, final: bool = True):
+    """(paragraphs as (text, style), section count, first-part header text of each section)."""
+    _set_view(doc, final)
+    headers = [doc.Sections.Item(i).Headers.Item(1).Range.Text for i in range(1, doc.Sections.Count + 1)]
+    return word_paragraph_rows(doc, final), doc.Sections.Count, headers
+
+
+def word_resolve_sections(session: WordSession, path: Path, accept: bool):
+    """Word's own Accept All or Reject All on an in-memory copy (nothing is saved)."""
+    doc = session.open_checked(path, read_only=False)
+    try:
+        for story in _stories(doc):
+            if accept:
+                story.Revisions.AcceptAll()
+            else:
+                story.Revisions.RejectAll()
+        return word_section_rows(doc, True)
+    finally:
+        doc.Close(WD_DO_NOT_SAVE)
+
+
+@pytest.mark.parametrize("name", list(SECTION_FIXTURES))
+@pytest.mark.parametrize("mode", ["accept", "reject"])
+def test_section_breaks_resolve_like_word(word, word_files, copy_of, tmp_path, name, mode):
+    """Tool output against Word's Accept All / Reject All: paragraph texts and styles in order, the
+    number of sections and each section's header. Refused cases must exit 2 and write nothing."""
+    src = copy_of(word_files[name])
+    out = tmp_path / f"{mode}.docx"
+    result = run_tool(tmp_path, "track-resolve", src, "--mode", mode, "--all", "--out", out)
+    refusal = REFUSED_SECTION.get((name, mode))
+    if refusal is not None:
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert refusal in result.stderr
+        assert not out.exists()
+        return
+    assert result.returncode == 0, result.stderr
+    expected = word_resolve_sections(word, src, accept=(mode == "accept"))
+    with word_doc(word, out) as doc:
+        assert word_revisions(doc) == []
+        assert word_section_rows(doc, True) == expected
 
 
 # ----------------------------------------------------------------- to-pdf through Word

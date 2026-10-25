@@ -4,6 +4,7 @@ Every test builds its own input files with python-docx. Run from the docx folder
     python -m pytest tests -v
 """
 
+import copy
 import importlib.util
 import json
 import shutil
@@ -436,6 +437,132 @@ def test_pm_track_show_lists_paragraph_marks(tmp_path):
     assert result.returncode == 0, result.stderr
     listed = json.loads(result.stdout)["revisions"]
     assert sorted((r["kind"], r["detail"] or "") for r in listed) == [("insert", ""), ("insert", "paragraph mark")]
+
+
+def _break_para(doc, text, mark, mark_id, *, layout=None):
+    """A paragraph whose mark is a tracked section break: w:sectPr is a copy of the body's section
+    properties (or of `layout`, an element to copy instead), so both sides have the same layout."""
+    p = _pm_para(doc, text, mark=mark, mark_id=mark_id)
+    source = layout if layout is not None else doc.element.body.sectPr
+    p._p.get_or_add_pPr().append(copy.deepcopy(source))
+    return p
+
+
+def _section_count(path):
+    return len(Document(str(path)).sections)
+
+
+def test_section_break_inserted_accept_keeps_reject_removes(tmp_path):
+    doc = Document()
+    _break_para(doc, "Alpha", "ins", 1)
+    _pm_para(doc, "", )
+    _pm_para(doc, "Beta")
+    src = tmp_path / "sec_ins.docx"
+    doc.save(src)
+    result, out = _resolve(tmp_path, src, "accept", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Normal", "Alpha"), ("Normal", ""), ("Normal", "Beta")]
+    assert _section_count(out) == 2
+    _assert_no_tracked_markup(out)
+    result, out = _resolve(tmp_path, src, "reject", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Normal", "Alpha"), ("Normal", "Beta")]
+    assert _section_count(out) == 1
+    _assert_no_tracked_markup(out)
+
+
+def test_section_break_deleted_accept_removes_reject_keeps(tmp_path):
+    doc = Document()
+    _break_para(doc, "Alpha", "del", 1)
+    _pm_para(doc, "", )
+    _pm_para(doc, "Beta")
+    src = tmp_path / "sec_del.docx"
+    doc.save(src)
+    result, out = _resolve(tmp_path, src, "accept", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Normal", "Alpha"), ("Normal", "Beta")]
+    assert _section_count(out) == 1
+    _assert_no_tracked_markup(out)
+    result, out = _resolve(tmp_path, src, "reject", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Normal", "Alpha"), ("Normal", ""), ("Normal", "Beta")]
+    assert _section_count(out) == 2
+    _assert_no_tracked_markup(out)
+
+
+def test_section_break_continuous_following_section_keeps_its_type(tmp_path):
+    doc = Document()
+    _break_para(doc, "Alpha", "del", 1)  # the break's copy has no start type
+    body_sect = doc.element.body.sectPr
+    body_sect.insert(0, OxmlElement("w:type"))
+    body_sect[0].set(qn("w:val"), "continuous")  # the section after the break starts continuously
+    _pm_para(doc, "", )
+    _pm_para(doc, "Beta")
+    src = tmp_path / "sec_cont.docx"
+    doc.save(src)
+    result, out = _resolve(tmp_path, src, "accept", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _paras(tmp_path, out) == [("Normal", "Alpha"), ("Normal", "Beta")]
+    assert _section_count(out) == 1
+    body_type = Document(str(out)).element.body.find(qn("w:sectPr")).find(qn("w:type"))
+    assert body_type is not None and body_type.get(qn("w:val")) == "continuous"
+
+
+def test_section_break_header_moves_to_following_section(tmp_path):
+    doc = Document()
+    doc.sections[0].header.is_linked_to_previous = False
+    doc.sections[0].header.paragraphs[0].text = "Head A"
+    _break_para(doc, "Alpha", "del", 1)  # the break carries the header reference
+    body_sect = doc.element.body.sectPr
+    for ref in body_sect.findall(qn("w:headerReference")):
+        body_sect.remove(ref)  # the section after the break is linked to the previous one
+    _pm_para(doc, "", )
+    _pm_para(doc, "Beta")
+    src = tmp_path / "sec_hdr.docx"
+    doc.save(src)
+    result, out = _resolve(tmp_path, src, "accept", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _section_count(out) == 1
+    refs = Document(str(out)).element.body.find(qn("w:sectPr")).findall(qn("w:headerReference"))
+    assert len(refs) == 1
+    _assert_no_tracked_markup(out)
+
+
+def test_section_break_layout_differs_refused(tmp_path):
+    doc = Document()
+    landscape = copy.deepcopy(doc.element.body.sectPr)
+    landscape.find(qn("w:pgSz")).set(qn("w:orient"), "landscape")
+    _break_para(doc, "Alpha", "del", 1, layout=landscape)
+    _pm_para(doc, "", )
+    _pm_para(doc, "Beta")
+    src = tmp_path / "sec_layout.docx"
+    doc.save(src)
+    result, out = _resolve(tmp_path, src, "accept", "--all")
+    assert result.returncode == 2
+    assert "section properties differ" in result.stderr
+    assert not out.exists()
+    result, out = _resolve(tmp_path, src, "reject", "--all")
+    assert result.returncode == 0, result.stderr
+    assert _section_count(out) == 2
+
+
+def test_section_properties_change_refused(tmp_path):
+    doc = Document()
+    _pm_para(doc, "Alpha")
+    body_sect = doc.element.body.sectPr
+    change = OxmlElement("w:sectPrChange")
+    change.set(qn("w:id"), "9")
+    change.set(qn("w:author"), "Ana")
+    change.set(qn("w:date"), "2026-10-01T09:00:00Z")
+    change.append(OxmlElement("w:sectPr"))
+    body_sect.append(change)
+    src = tmp_path / "sec_change.docx"
+    doc.save(src)
+    for mode in ("accept", "reject"):
+        result, out = _resolve(tmp_path, src, mode, "--all")
+        assert result.returncode == 2
+        assert "tracked change to section properties" in result.stderr
+        assert not out.exists()
 
 
 def test_comments_add(tmp_path):

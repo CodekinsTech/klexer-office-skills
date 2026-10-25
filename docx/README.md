@@ -40,7 +40,7 @@ The Word checks need the same venv with pywin32 (`venv\Scripts\python.exe -m pip
 
     venv\Scripts\python.exe -m pytest tests\test_word_com.py -v
 
-They start Word through COM, build ten Word-made files (six general, four paragraph-mark cases), run the write commands on them, and open each output in Word. A prompt from Word while it opens a file, or an exception from Word, fails the check. They take about three minutes. Word's `UseLocalUserInfo` option is set for the run so that revision and comment authors are the names the test uses; the old value is restored before Word quits.
+They start Word through COM, build 21 Word-made files (six general, four paragraph-mark cases, eleven section-break cases), run the write commands on them, and open each output in Word. A prompt from Word while it opens a file, or an exception from Word, fails the check. They take about three minutes. Word's `UseLocalUserInfo` option is set for the run so that revision and comment authors are the names the test uses; the old value is restored before Word quits.
 
 ## Decisions where the spec was open
 
@@ -82,10 +82,18 @@ Paragraph marks
   - Rejecting an inserted mark: the joined paragraph keeps the next paragraph's properties.
 - Word writes a paragraph-property change (`w:pPrChange`) with a mark deletion when the joined paragraph's formatting changes. That change is resolved together with the mark: accept drops it, reject restores the old properties. It is resolved only when it sits on a paragraph whose mark is in the same resolve, and it must be selected too (with `--all`, or with `--id` for both). Selecting only the mark is refused with exit 2 and the message "must be selected too".
 - Refused with exit 2 and nothing written (`cannot be resolved by this skill`):
-  - a mark that ends a section (a section break);
+  - a section break whose page layout differs from the section after it (`section properties differ`, see Section breaks);
+  - a tracked change to section properties (`w:sectPrChange`), refused with `A tracked change to section properties cannot be resolved by this skill.`;
   - a mark that must be removed with no paragraph after it in the same story or table cell (for example the last paragraph of the body);
   - a formatting change on a paragraph involved in a mark removal that is not resolved with it;
   - any other `unsupported` revision, as before (`rPrChange`, table row or cell changes, moves, nested revisions). Comment markers inside a removed element are moved out first. A comment whose text is all removed is dropped with its entry in `comments.xml`, because Word does the same.
+
+Section breaks
+- A section break is a paragraph whose mark carries a `w:sectPr` (the properties of the section that ends there). Accepting an inserted break or rejecting a deleted break keeps it, as before.
+- Removing a break (rejecting an inserted break, or accepting a deleted one) drops the break's own section properties. The section after the break keeps its own properties, which is what Word does. Word's Accept All and Reject All were compared on Word-made files (`test_word_com.py`, `SECTION_FIXTURES`): next-page and continuous breaks, two breaks, a break on a heading paragraph, and header references on one side or both.
+- The two layouts must be equal before a break is removed. Compared: page size, orientation, margins, columns and the other settings. Not compared: the start type (`w:type`), which Word writes on the section after a continuous break, and the header and footer references. A layout that differs is refused (exit 2, `section properties differ`), because Word would give the merged section the following layout without telling the user. The same break can still be rejected when it is a deleted break, since rejecting keeps it.
+- Header and footer references: the section after the break takes the break's references when it has none (Word does this for a break inserted under a header). When both sections have references, the section after the break keeps its own. The header parts of the removed references stay in the package unreferenced when both sides had them (Word deletes them); their text is still searched by `replace` and `fill`.
+- The section count is checked on the output: it must equal the count before minus the breaks removed.
 
 Summary
 - Headings come from paragraph styles named `Heading 1` to `Heading 9` (not `Title`).
@@ -157,5 +165,5 @@ Locks and writes
 
 ## Acceptance test results
 
-Run on Windows 11, Python 3.11.9, Word 16.0, python-docx 1.2.0, lxml 6.1.3, pypdf 6.21.2, pywin32 312, pytest 9.1.1: 85 tests pass (25 in `test_docx_tool.py`, 60 in `test_word_com.py`). The benchmark (`benchmark
+Run on Windows 11, Python 3.11.9, Word 16.0, python-docx 1.2.0, lxml 6.1.3, pypdf 6.21.2, pywin32 312, pytest 9.1.1: 113 tests pass (31 in `test_docx_tool.py`, 82 in `test_word_com.py`). The benchmark (`benchmark
 un_benchmark.py`, run with the venv that has pywin32) scores 30/30; its to-pdf task ran the Word variant.

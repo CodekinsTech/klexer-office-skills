@@ -80,7 +80,7 @@ Lists tracked changes.
 Accepts or rejects tracked insertions and deletions.
 - Input: a .docx. Options: `--mode accept|reject` (required), and either `--id N` (repeatable) or `--all`. Plus `--out`, `--force`, `--json`, `--in-place`.
 - Rules: accept an insertion keeps its text. Accept a deletion removes its text. Reject an insertion removes its text. Reject a deletion keeps its text as normal text.
-- Paragraph marks: a removed mark joins its paragraph with the next one, as Word does. A mark that ends a section, or that has no following paragraph in its story or cell, is refused (exit 2, nothing written).
+- Paragraph marks: a removed mark joins its paragraph with the next one, as Word does. A section break (a removed mark whose paragraph holds the section properties) is removed the same way when the section before and the section after it have the same page layout; the section after keeps its own properties. Refused (exit 2, nothing written): a break whose layout differs from the section after it, a tracked change to section properties, and a removed mark with no following paragraph in its story or cell.
 - If the chosen set includes any `unsupported` revision, nothing is written and the command exits 2. Use `track-show` to see them. The one exception is a paragraph-property change that Word pairs with a deleted paragraph mark: it is resolved with that mark when both are chosen (`--all`), and choosing the mark alone exits 2.
 - The output is checked again: the number of tracked changes left must equal the number not chosen.
 - JSON output: `{"resolved": N, "remaining": N, "output": "<path>"}`.
