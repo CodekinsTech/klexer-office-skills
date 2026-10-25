@@ -29,6 +29,7 @@ WORK = HERE / "work"
 TASKS_JSON = HERE / "tasks.json"
 RESULTS_MD = HERE / "results.md"
 DEFAULT_PYTHON = Path(sys.executable)
+                      r"\59914a7a-0dc9-4ea2-93ba-658242a2ee94\scratchpad\venv-v2-xlsx\Scripts\python.exe")
 DEFAULT_CLI = HERE.parent / "scripts" / "xlsx_tool.py"
 TIMEOUT_SECONDS = 300
 CATEGORY_ORDER = ["sheets", "read", "write", "format", "recalc", "refusal", "errors", "validate", "check-values"]

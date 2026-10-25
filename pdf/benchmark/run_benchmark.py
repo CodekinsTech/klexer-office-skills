@@ -26,8 +26,9 @@ FIX = HERE / "fixtures"
 RUNS = HERE / "runs"
 MANIFEST = HERE / "tasks.json"
 RESULTS = HERE / "results.md"
-DEFAULT_TOOL = Path(__file__).resolve().parents[1] / "scripts" / "pdf_tool.py"
+DEFAULT_TOOL = Path(r"<skill-folder>\pdf\scripts\pdf_tool.py")
 DEFAULT_PY = Path(sys.executable)
+                  r"\59914a7a-0dc9-4ea2-93ba-658242a2ee94\scratchpad\venv-v2-pdf\Scripts\python.exe")
 SNIP = 1500
 PASSWORD_ENV_NAMES = ["PDF_TEST_PW", "PDF_PASSWORD"]
 
