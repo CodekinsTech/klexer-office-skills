@@ -29,9 +29,6 @@ WORK = HERE / "_work"
 RESULTS = HERE / "results.md"
 DEFAULT_TOOL = Path(__file__).resolve().parents[1] / "scripts" / "pptx_tool.py"
 DEFAULT_PYTHON = Path(sys.executable)
-                      r"\C--Users-Nishan-Desktop-projects"
-                      r"\59914a7a-0dc9-4ea2-93ba-658242a2ee94"
-                      r"\scratchpad\venv-v2-pptx\Scripts\python.exe")
 TIMEOUT_S = 120
 
 try:
